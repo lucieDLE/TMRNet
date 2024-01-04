@@ -10,10 +10,11 @@ import os
 import numpy as np
 import PIL
 from PIL import Image
+import imageio
 
-
-source_path = "xxx/Videos/"  # original path
-save_path = "xxx/frame/"  # save path
+import pandas as pd 
+source_path = "/CMF/data/lumargot/cholec80/videos/"  # original path
+save_path = "/CMF/data/lumargot/cholec80/frames/"  # save path
 
 
 def change_size(image):
@@ -43,54 +44,72 @@ def change_size(image):
     height = top - bottom  
 
     pre1_picture = image[left:left + width, bottom:bottom + height]  
-
-    #print(pre1_picture.shape) 
     
     return pre1_picture  
 
+def main():
 
-Video_num = 0
+    in_dir = '/CMF/data/jprieto/hysterectomy/data/Clips/'
+    out_dir = '/CMF/data/lumargot/hysterectomy/'
 
-while True:
+    # for fold in os.listdir(in_dir):
+    #     sub_fold = os.path.join(in_dir, fold)
+    #     print(fold)
+    #     if(os.path.isdir(sub_fold)):
+    #         out_sub_dir = os.path.join(out_dir, fold)
+    #         if not os.path.exists(out_sub_dir):
+    #             os.mkdir(out_sub_dir)
 
-    Video_num = Video_num+1
-    frame_num = 0
-    if not os.path.exists(save_path+str(Video_num)):
-        os.mkdir(save_path+str(Video_num)) 
+    #         for file in os.listdir(sub_fold):
+    #             vid_path  = os.path.join(sub_fold, file)
 
-    cap = cv2.VideoCapture(source_path+"Chole"+str(Video_num)+".mp4")
+    #             splitted = file.split('_')
+    #             name = ('_').join(splitted[:-2])
+    #             save_path = os.path.join(out_sub_dir, name)
+    #             ## save as name_frame_idx.png
+
+    #             # Use imageio for video reading
+    #             video_reader = imageio.get_reader(vid_path)
+    #             frame_num = 0
+    #             for frame in video_reader:
+    #                 # Frame is a NumPy array, can be passed to OpenCV directly
+    #                 if frame_num %25 ==0:
+    #                     img_save_path = save_path + '_' + str(frame_num) + ".png"
+    #                     img_result = PIL.Image.fromarray(frame)
+    #                     img_result.save(img_save_path)
+
+    #                 frame_num = frame_num + 1
+
+
+
+    n_classes = []
+    n_files = []
+    n_id = []
+
+    df  = pd.read_csv('../../scripts/hyst_ds_train_test_wo_label.csv')
+
+    for fold in os.listdir(out_dir):
+        sub_fold = os.path.join(out_dir, fold)
+        print(fold)
+        if(os.path.isdir(sub_fold)):
+
+            for file in os.listdir(sub_fold):
+                vid_path  = os.path.join(sub_fold, file)
+                splitted = file.split('_')
+                name = ('_').join(splitted[:-1])
+                id = splitted[-2]
+                if (df['vid_path'].str.contains(name).any()):
+                    n_files.append(vid_path)
+                    n_classes.append(fold)
+                    n_id.append(id)
+            
+        
+        
+    df = pd.DataFrame(data={"frames":n_files,"class":n_classes, 'id':n_id})
+    df.to_csv('../../scripts/val_frames.csv')
+
     
-    while cap.isOpened():
-        ret, frame = cap.read()
+    print("Cut Done")
 
-        if not ret:
-            break
-        
-        img_save_path = save_path+str(Video_num)+'/'+ str(frame_num)+".jpg"
-        
-        dim = (int(frame.shape[1]/frame.shape[0]*300), 300)
-        
-        frame = cv2.resize(frame,dim)
-        frame = change_size(frame)
-        img_result = cv2.resize(frame,(250,250))
-        print(img_result.shape)
-        print(img_result.dtype)
-
-        img_result = cv2.cvtColor(img_result, cv2.COLOR_BGR2RGB)
-        img_result = PIL.Image.fromarray(img_result)
-        print(img_result.mode)
-
-        cv2.imwrite(img_save_path, img_result)
-        print(img_save_path) 
-        frame_num = frame_num+1
-        cv2.waitKey(1)
-
-
-    if Video_num==1:
-        break
-                
-
-cap.release()
-cv2.destroyAllWindows()
-print("Cut Done")
-
+if __name__ == "__main__":
+    main()

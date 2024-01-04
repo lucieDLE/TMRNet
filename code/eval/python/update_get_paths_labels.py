@@ -1,49 +1,29 @@
 import os
 import numpy as np
 import pickle
+from utils import get_dirs2, get_files2
+import argparse
+
+##
+## script creating picke file splitting train/val/test dataset (contains paths and label)
+##
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--data', default=True, type=str, help='data directory')
+parser.add_argument('--cholec', default='.', type=str, help='output file path (.pkl)')
+parser.add_argument('--test_label', default='.', type=str, help='output file path (.pkl)')
+
+args = parser.parse_args()
 
 
-root_dir2 =  '/research/dept6/yhlong/Miccai19_challenge/cholec80/'
-img_dir2 = os.path.join(root_dir2, 'cutMargin')
-phase_dir2 = os.path.join(root_dir2, 'phase_annotations')
-tool_dir2 = os.path.join(root_dir2, 'tool_annotations')
+## put in arguments
+img_dir2 = os.path.join(args.data, 'frames')
+phase_dir2 = os.path.join(args.data, 'phase_annotations')
+tool_dir2 = os.path.join(args.data, 'tool_annotations')
 
-#train_video_num = 8
-#val_video_num = 4
-#test_video_num = 2
-
-print(root_dir2)
+print(args.data)
 print(img_dir2)
 print(phase_dir2)
-
-
-#cholec80==================
-def get_dirs2(root_dir):
-    file_paths = []
-    file_names = []
-    for lists in os.listdir(root_dir):
-        path = os.path.join(root_dir, lists)
-        if os.path.isdir(path):
-            file_paths.append(path)
-            file_names.append(os.path.basename(path))
-    file_names.sort(key=lambda x:int(x))
-    file_paths.sort(key=lambda x:int(os.path.basename(x)))
-    return file_names, file_paths
-
-def get_files2(root_dir):
-    file_paths = []
-    file_names = []
-    for lists in os.listdir(root_dir):
-        path = os.path.join(root_dir, lists)
-        if not os.path.isdir(path):
-            file_paths.append(path)
-            file_names.append(os.path.basename(path))
-    file_names.sort()
-    file_paths.sort()
-    return file_names, file_paths
-#cholec80==================
-
-
 
 #cholec80==================
 img_dir_names2, img_dir_paths2 = get_dirs2(img_dir2)
@@ -62,7 +42,7 @@ print(phase_dict)
 #cholec80==================
 all_info_all2 = []
 
-for j in range(len(phase_file_names2)):
+for j in range(len(img_dir_paths2)):
     downsample_rate = 25
     phase_file = open(phase_file_paths2[j])
     tool_file = open(tool_file_paths2[j])
@@ -82,19 +62,19 @@ for j in range(len(phase_file_names2)):
         if int(phase_split[0]) % downsample_rate == 0:
             info_each = []
             img_file_each_path = os.path.join(img_dir_paths2[j], phase_split[0] + '.jpg')
-            info_each.append(img_file_each_path)
-            info_each.append(phase_dict[phase_split[1]])
-            info_all.append(info_each)            
+            if os.path.exists(img_file_each_path):
+                info_each.append(img_file_each_path)
+                info_each.append(phase_dict[phase_split[1]])
+                info_all.append(info_each)              
 
     # print(len(info_all))
     all_info_all2.append(info_all)
 #cholec80==================
 
-
-with open('./cholec80.pkl', 'wb') as f:
+with open(args.outfile, 'wb') as f:
     pickle.dump(all_info_all2, f)
 
-with open('./cholec80.pkl', 'rb') as f:
+with open(args.outfile, 'rb') as f:
     all_info_80 = pickle.load(f)
 
 
@@ -110,11 +90,14 @@ train_num_each_80 = []
 val_num_each_80 = []
 test_num_each_80 = []
 
-for i in range(40):
-    train_num_each_80.append(len(all_info_80[i]))
+# print(all_info_80) # [video 1[[f1, label], ..., [fn, label]], video2[[f2,label]...[fn,label]], ...]
+
+for i in range(40): ## train of 40 videos
+    # print(all_info_80[i]) # access 1st video and so list of [fn, label]
+    train_num_each_80.append(len(all_info_80[i])) # list going from frame 1 to frame n
     for j in range(len(all_info_80[i])):
-        train_file_paths_80.append(all_info_80[i][j][0])
-        train_labels_80.append(all_info_80[i][j][1:])
+        train_file_paths_80.append(all_info_80[i][j][0]) #take path of frame
+        train_labels_80.append(all_info_80[i][j][1:])#take label of frame
 
 print(len(train_file_paths_80))
 print(len(train_labels_80))
@@ -148,9 +131,8 @@ train_val_test_paths_labels.append(test_labels_80)
 
 train_val_test_paths_labels.append(test_num_each_80)
 
-with open('test_paths_labels.pkl', 'wb') as f:
+with open(args.test_label, 'wb') as f:
     pickle.dump(train_val_test_paths_labels, f)
-
 
 print('Done')
 print()

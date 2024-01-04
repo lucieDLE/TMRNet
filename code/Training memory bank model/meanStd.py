@@ -3,11 +3,7 @@ from torch.utils.data import DataLoader, Dataset, sampler
 from torchvision import transforms
 import pickle
 from PIL import Image
-
-def pil_loader(path):
-    with open(path, 'rb') as f:
-        with Image.open(f) as img:
-            return img.convert('RGB')
+from utils import pil_loader
 
 class CholecDataset(Dataset):
     def __init__(self, file_paths, transform=None,

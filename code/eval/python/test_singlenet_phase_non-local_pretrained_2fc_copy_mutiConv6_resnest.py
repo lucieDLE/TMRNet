@@ -257,6 +257,69 @@ def get_test_data(data_path):
     return test_dataset, test_num_each
 
 
+def get_csv_data(data_path, split='train'):
+    df = pd.read_csv(data_path)
+
+    paths = df['frame'].to_numpy()
+    labels = df['class'].to_numpy()
+    n_classes = np.unique(labels)
+    num_each = []
+
+    for class_name in n_classes:
+        df_tmp = df.loc[df['class']==class_name]
+        len_vids = df_tmp['id'].value_counts().to_list()
+        for elt in len_vids:
+           num_each.append(elt)
+
+    print((num_each))
+    print('{}_paths  : {:6d}'.format(split, len(paths)))
+
+    train_transforms = None
+    test_transforms = None
+
+    if crop_type == 0:
+        test_transforms = transforms.Compose([
+            transforms.Resize((250, 250)),
+            transforms.RandomCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize([0.41757566,0.26098573,0.25888634],[0.21938758,0.1983,0.19342837])
+        ])
+    elif crop_type == 1:
+        test_transforms = transforms.Compose([
+            transforms.Resize((250, 250)),
+            transforms.CenterCrop(224),
+            transforms.ToTensor(),
+            transforms.Normalize([0.41757566,0.26098573,0.25888634],[0.21938758,0.1983,0.19342837])
+        ])
+    elif crop_type == 2:
+        test_transforms = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize([0.41757566,0.26098573,0.25888634],[0.21938758,0.1983,0.19342837])
+        ])
+    elif crop_type == 5:
+        test_transforms = transforms.Compose([
+            transforms.Resize((250, 250)),
+            transforms.FiveCrop(224),
+            Lambda(lambda crops: torch.stack([transforms.ToTensor()(crop) for crop in crops])),
+            Lambda(
+                lambda crops: torch.stack(
+                    [transforms.Normalize([0.41757566,0.26098573,0.25888634],[0.21938758,0.1983,0.19342837])(crop) for crop in crops]))
+        ])
+    elif crop_type == 10:
+        test_transforms = transforms.Compose([
+            transforms.Resize((250, 250)),
+            transforms.TenCrop(224),
+            Lambda(lambda crops: torch.stack([transforms.ToTensor()(crop) for crop in crops])),
+            Lambda(
+                lambda crops: torch.stack(
+                    [transforms.Normalize([0.41757566,0.26098573,0.25888634],[0.21938758,0.1983,0.19342837])(crop) for crop in crops]))
+        ])
+    dataset = CholecDataset(paths, labels, test_transforms)
+
+    return dataset, num_each
+
+
 # TODO
 # 序列采样sampler
 class SeqSampler(Sampler):
@@ -275,6 +338,8 @@ class SeqSampler(Sampler):
 g_LFB_test = np.zeros(shape=(0, 512))
 
 def test_model(test_dataset, test_num_each):
+
+
     num_test = len(test_dataset)
     test_useful_start_idx = get_useful_start_idx(sequence_length, test_num_each)
     test_useful_start_idx_LFB = get_useful_start_idx_LFB(sequence_length, test_num_each)
@@ -315,6 +380,8 @@ def test_model(test_dataset, test_num_each):
     global g_LFB_test
     print("loading features!>.........")
 
+    load_exist_LFB=False
+
     if not load_exist_LFB:
 
         test_feature_loader = DataLoader(
@@ -326,8 +393,9 @@ def test_model(test_dataset, test_num_each):
         )
 
         model_LFB = resnet_lstm_LFB()
-
-        model_LFB.load_state_dict(torch.load("./LFB/FBmodel/lstm_epoch_12_length_10_opt_0_mulopt_1_flip_1_crop_1_batch_400_train_9989_val_8839.pth"), strict=False)
+        lfb_model_path = "./LFB/FBmodel/lstm_epoch_7_length_10_opt_0_mulopt_1_flip_1_crop_1_batch_90_train_9993_val_8668.pth"
+        # lfb_model_path = "/home/lumargot/TMRNet/pretrained_model/pretrained_LFB_model.pth"
+        model_LFB.load_state_dict(torch.load(lfb_model_path), strict=False)
 
         if use_gpu:
             model_LFB = DataParallel(model_LFB)
@@ -359,11 +427,11 @@ def test_model(test_dataset, test_num_each):
         print("finish!")
         g_LFB_test = np.array(g_LFB_test)
 
-        with open("./LFB/g_LFB_test_st.pkl", 'wb') as f:
+        with open("/home/lumargot/TMRNet/LFB/g_LFB_test_st_hyst.pkl", 'wb') as f:
             pickle.dump(g_LFB_test, f)
 
     else:
-        with open("./LFB/g_LFB_test_st.pkl", 'rb') as f:
+        with open("./LFB/g_LFB_test_st_hyst.pkl", 'rb') as f:
             g_LFB_test = pickle.load(f)
 
         print("load completed")
@@ -467,8 +535,8 @@ print()
 
 
 def main():
-    test_dataset, test_num_each = get_test_data(
-        './test_paths_labels.pkl')
+    test_dataset, test_num_each = get_csv_data(
+        '/home/lumargot/scripts/test_frames.csv', 'test')
 
     test_model(test_dataset, test_num_each)
 

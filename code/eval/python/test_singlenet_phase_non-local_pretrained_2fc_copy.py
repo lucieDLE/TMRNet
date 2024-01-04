@@ -13,6 +13,7 @@ import numpy as np
 import argparse
 from torchvision.transforms import Lambda
 from NLBlock import NLBlock
+import sklearn
 
 parser = argparse.ArgumentParser(description='lstm testing')
 parser.add_argument('-g', '--gpu', default=True, type=bool, help='use gpu, default True')
@@ -418,27 +419,24 @@ def test_model(test_dataset, test_num_each):
             Sm = nn.Softmax()
             outputs = Sm(outputs)
             possibility, preds = torch.max(outputs.data, 1)
-            print("possibility:",possibility)
 
             for i in range(len(preds)):
                 all_preds.append(preds[i].data.cpu())
             for i in range(len(possibility)):
                 all_preds_score.append(possibility[i].data.cpu())
-            print("all_preds length:",len(all_preds))
-            print("all_preds_score length:",len(all_preds_score)) 
             loss = criterion(outputs, labels)
             # TODO 和batchsize相关
             # test_loss += loss.data[0]/test_loss += loss.data.item()
-            print("preds:",preds.data.cpu())
-            print("labels:",labels.data.cpu())
+
 
             test_loss += loss.data.item()
             test_corrects += torch.sum(preds == labels.data)
-            print("test_corrects:",test_corrects)
 
     test_elapsed_time = time.time() - test_start_time
     test_accuracy = float(test_corrects) / float(num_test_we_use)
     test_average_loss = test_loss / num_test_we_use
+
+    # matrix = sklearn.metrics.confusion_matrix(y_true, y_pred)
 
     print('type of all_preds:', type(all_preds))
     print('leng of all preds:', len(all_preds))
@@ -463,7 +461,7 @@ print()
 
 def main():
     test_dataset, test_num_each = get_test_data(
-        './test_paths_labels.pkl')
+        './test_paths_hyst.pkl')
 
     test_model(test_dataset, test_num_each)
 

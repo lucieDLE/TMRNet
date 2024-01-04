@@ -36,9 +36,13 @@ if num_labels == (num_preds + (sequence_length - 1) * num_video):
     preds_all = []
     label_all = []
     count = 0
+
+    file_dir= '/CMF/data/lumargot/cholec80/result/'
+
+    print(os.path.isdir(file_dir))
     for i in range(40,80):
-        filename = '../result/phase/video' + str(1 + i) + '-phase.txt'
-        gt_filename = '../result/gt-phase/video' + str(1 + i) + '-phase.txt'
+        filename = file_dir + 'video' + str(1 + i) + '-phase.txt'
+        gt_filename = file_dir +  'gt-phase/video' + str(1 + i) + '-phase.txt'
         f = open(filename, 'w')
         #f.write('Frame Phase')
         #f.write('\n')

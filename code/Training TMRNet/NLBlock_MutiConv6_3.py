@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.init as init
 import torch.nn.functional as F
-from torchsummary import summary
+# from torchsummary import summary
 from torch.nn import DataParallel
 import numpy as np
 

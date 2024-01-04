@@ -18,11 +18,10 @@ import argparse
 import copy
 import random
 import numbers
-from torch.utils.tensorboard import SummaryWriter
 from sklearn import metrics
 from NLBlock_MutiConv6_3 import NLBlock
 from NLBlock_MutiConv6_3 import TimeConv
-import os
+from resnest.torch import resnest50
 
 parser = argparse.ArgumentParser(description='lstm training')
 parser.add_argument('-g', '--gpu', default=True, type=bool, help='gpu use, default True')
@@ -201,12 +200,14 @@ class CholecDataset(Dataset):
     def __len__(self):
         return len(self.file_paths)
 
-from resnest.torch import resnest50
 
 class resnet_lstm(torch.nn.Module):
     def __init__(self):
         super(resnet_lstm, self).__init__()
-        resnet = resnest50(pretrained=True)
+        #torch.hub.list('zhanghang1989/ResNeSt', force_reload=True)
+        # load pretrained models, using ResNeSt-50 as an example
+        #resnet = torch.hub.load('zhanghang1989/ResNeSt', 'resnest50', pretrained=True)
+        resnet = resnest50()
         self.share = torch.nn.Sequential()
         self.share.add_module("conv1", resnet.conv1)
         self.share.add_module("bn1", resnet.bn1)
@@ -251,7 +252,10 @@ class resnet_lstm(torch.nn.Module):
 class resnet_lstm_LFB(torch.nn.Module):
     def __init__(self):
         super(resnet_lstm_LFB, self).__init__()
-        resnet = resnest50(pretrained=True)
+        #torch.hub.list('zhanghang1989/ResNeSt', force_reload=True)
+        # load pretrained models, using ResNeSt-50 as an example
+        #resnet = torch.hub.load('zhanghang1989/ResNeSt', 'resnest50', pretrained=True)
+        resnet = resnest50()
         self.share = torch.nn.Sequential()
         self.share.add_module("conv1", resnet.conv1)
         self.share.add_module("bn1", resnet.bn1)
@@ -325,9 +329,12 @@ def get_data(data_path):
 
     train_paths_80 = train_test_paths_labels[0]
     val_paths_80 = train_test_paths_labels[1]
+
     train_labels_80 = train_test_paths_labels[2]
     val_labels_80 = train_test_paths_labels[3]
-    train_num_each_80 = train_test_paths_labels[4]
+
+    ## num of videos used for training/validation 
+    train_num_each_80 = train_test_paths_labels[4] 
     val_num_each_80 = train_test_paths_labels[5]
 
     print('train_paths_80  : {:6d}'.format(len(train_paths_80)))
@@ -357,7 +364,6 @@ def get_data(data_path):
             transforms.ToTensor(),
             transforms.Normalize([0.41757566,0.26098573,0.25888634], [0.21938758,0.1983,0.19342837])
         ])
-
     if crop_type == 0:
         test_transforms = transforms.Compose([
             transforms.Resize((250, 250)),
@@ -397,9 +403,13 @@ def get_data(data_path):
                     [transforms.Normalize([0.41757566,0.26098573,0.25888634],[0.21938758,0.1983,0.19342837])(crop) for crop in crops]))
         ])
 
+
+    ## train is flip - test is cropped
     train_dataset_80 = CholecDataset(train_paths_80, train_labels_80, train_transforms)
-    train_dataset_80_LFB = CholecDataset(train_paths_80, train_labels_80, test_transforms)
     val_dataset_80 = CholecDataset(val_paths_80, val_labels_80, test_transforms)
+    
+    # same train dataset for LFB but cropped instead of flip
+    train_dataset_80_LFB = CholecDataset(train_paths_80, train_labels_80, test_transforms)
 
     return (train_dataset_80,train_dataset_80_LFB), train_num_each_80, \
            val_dataset_80, val_num_each_80
@@ -440,7 +450,8 @@ def valMinibatch(testloader, model, dict_start_idx_LFB):
             labels_phase = labels_phase[(sequence_length - 1)::sequence_length]
 
             start_index_list = data[2]
-            start_index_list = start_index_list[0::sequence_length]
+            start_index_list = start_index_list[0::sequence_length].to_numpy()
+            print(start_index_list.shape)
             long_feature = get_long_feature(
                 start_index_list=start_index_list,
                 dict_start_idx_LFB=dict_start_idx_LFB,
@@ -464,13 +475,11 @@ def valMinibatch(testloader, model, dict_start_idx_LFB):
 
 def train_model(train_dataset, train_num_each, val_dataset, val_num_each):
     # TensorBoard
-    writer = SummaryWriter('runs/non-local/pretrained_lr5e-7_L30_2fc_copy_mutiConv6_resnest_bs40/')
+    # writer = SummaryWriter('runs/non-local/pretrained_lr5e-7_L30_2fc_copy_mutiConv6_resnest_bs40/')
 
-    (train_num_each_80),\
-    (val_dataset),\
-    (val_num_each) = train_num_each, val_dataset, val_num_each
-
-    (train_dataset_80,train_dataset_80_LFB) = train_dataset
+    (train_num_each_80), (val_dataset), (val_num_each) = train_num_each, val_dataset, val_num_each
+    ## why is it done like this, maybe simplify ??? 
+    (train_dataset_80, train_dataset_80_LFB) = train_dataset
 
     train_useful_start_idx_80 = get_useful_start_idx(sequence_length, train_num_each_80)
     val_useful_start_idx = get_useful_start_idx(sequence_length, val_num_each)
@@ -478,11 +487,16 @@ def train_model(train_dataset, train_num_each, val_dataset, val_num_each):
     train_useful_start_idx_80_LFB = get_useful_start_idx_LFB(sequence_length, train_num_each_80)
     val_useful_start_idx_LFB = get_useful_start_idx_LFB(sequence_length, val_num_each)
 
+    ## train and val start idx are the samr for the LFB and the notmal network
+
     num_train_we_use_80 = len(train_useful_start_idx_80)
     num_val_we_use = len(val_useful_start_idx)
 
+    ## again, same as above
     num_train_we_use_80_LFB = len(train_useful_start_idx_80_LFB)
     num_val_we_use_LFB = len(val_useful_start_idx_LFB)
+
+    print(num_train_we_use_80, num_train_we_use_80_LFB, len(train_useful_start_idx_80_LFB), len(train_useful_start_idx_80))
 
     train_we_use_start_idx_80 = train_useful_start_idx_80
     val_we_use_start_idx = val_useful_start_idx
@@ -539,6 +553,9 @@ def train_model(train_dataset, train_num_each, val_dataset, val_num_each):
     global g_LFB_val
     print("loading features!>.........")
 
+    load_exist_LFB = False
+
+    ## if there is no bank
     if not load_exist_LFB:
         
         train_feature_loader = DataLoader(
@@ -745,25 +762,25 @@ def train_model(train_dataset, train_num_each, val_dataset, val_num_each):
             if i % 500 == 499:
                 # ...log the running loss
                 batch_iters = epoch * num_train_all/sequence_length + i*train_batch_size/sequence_length
-                writer.add_scalar('training loss phase',
-                                  running_loss_phase / (train_batch_size*500/sequence_length) ,
-                                  batch_iters)
-                # ...log the training acc
-                writer.add_scalar('training acc phase',
-                                  float(minibatch_correct_phase) / (float(train_batch_size)*500/sequence_length),
-                                  batch_iters)
-                # ...log the val acc loss
+                # writer.add_scalar('training loss phase',
+                #                   running_loss_phase / (train_batch_size*500/sequence_length) ,
+                #                   batch_iters)
+                # # ...log the training acc
+                # writer.add_scalar('training acc phase',
+                #                   float(minibatch_correct_phase) / (float(train_batch_size)*500/sequence_length),
+                #                   batch_iters)
+                # # ...log the val acc loss
 
-                val_loss_phase, val_corrects_phase = valMinibatch(
-                    val_loader,
-                    model,
-                    dict_start_idx_LFB=dict_val_start_idx_LFB)
-                writer.add_scalar('validation acc miniBatch phase',
-                                  float(val_corrects_phase) / float(num_val_we_use),
-                                  batch_iters)
-                writer.add_scalar('validation loss miniBatch phase',
-                                  float(val_loss_phase) / float(num_val_we_use),
-                                  batch_iters)
+                # val_loss_phase, val_corrects_phase = valMinibatch(
+                #     val_loader,
+                #     model,
+                #     dict_start_idx_LFB=dict_val_start_idx_LFB)
+                # writer.add_scalar('validation acc miniBatch phase',
+                #                   float(val_corrects_phase) / float(num_val_we_use),
+                #                   batch_iters)
+                # writer.add_scalar('validation loss miniBatch phase',
+                #                   float(val_loss_phase) / float(num_val_we_use),
+                #                   batch_iters)
 
                 val_accuracy_phase = float(val_corrects_phase) / float(num_val_we_use)
 
@@ -852,10 +869,10 @@ def train_model(train_dataset, train_num_each, val_dataset, val_num_each):
         val_precision_each_phase = metrics.precision_score(val_all_labels_phase,val_all_preds_phase, average=None)
         val_recall_each_phase = metrics.recall_score(val_all_labels_phase,val_all_preds_phase, average=None)
 
-        writer.add_scalar('validation acc epoch phase',
-                          float(val_accuracy_phase), epoch)
-        writer.add_scalar('validation loss epoch phase',
-                          float(val_average_loss_phase), epoch)
+        # writer.add_scalar('validation acc epoch phase',
+        #                   float(val_accuracy_phase), epoch)
+        # writer.add_scalar('validation loss epoch phase',
+        #                   float(val_average_loss_phase), epoch)
 
         print('epoch: {:4d}'
               ' train in: {:2.0f}m{:2.0f}s'

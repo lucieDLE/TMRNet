@@ -1,6 +1,9 @@
 from comet_ml import Experiment
+import io
 import torch
 import torch.nn as nn
+from sklearn.utils import class_weight
+
 import torch.optim as optim
 from torch.optim import lr_scheduler
 import torch.nn.init as init
@@ -19,15 +22,46 @@ import argparse
 import copy
 import random
 import numbers
-from torch.utils.tensorboard import SummaryWriter
+import os
 from sklearn import metrics
 from NLBlock_MutiConv6_3 import NLBlock
 from NLBlock_MutiConv6_3 import TimeConv
 from torchvision.models import resnet50, ResNet50_Weights
-from sklearn.utils import class_weight
-import pandas as pd 
+import imageio
+import pandas as pd
+import monai
+import matplotlib.pyplot as plt
+from monai.transforms import (
+    EnsureChannelFirst,
+    ToTensor,
+    ScaleIntensityRange,
+    RandGaussianNoise,
+    Compose,
+    RandRotated,
+    ScaleIntensityd,    
+    ToTensord,
+    EnsureType,
+    Activations, 
+    AsDiscrete, 
+    Resized,
+    RandZoomd,
+    Lambdad,
+    CenterSpatialCrop,
+    ResizeWithPadOrCrop
+)
+
+import imageio.v3 as iio
 
 parser = argparse.ArgumentParser(description='lstm training')
+
+parser.add_argument('--train_csv', type=str, help='')
+parser.add_argument('--val_csv', type=str, help='')
+parser.add_argument('--mount_point', type=str, help='')
+
+
+parser.add_argument('--load_LFB', default=True, type=bool, help='whether load exist long term feature bank')
+parser.add_argument('--model_path', default='./LFB/FBmodel/x.pth', type=str, help='the path of the memory bank model')
+
 parser.add_argument('-g', '--gpu', default=True, type=bool, help='gpu use, default True')
 parser.add_argument('-s', '--seq', default=10, type=int, help='sequence length, default 10')
 parser.add_argument('-t', '--train', default=90, type=int, help='train batch size, default 400')
@@ -47,9 +81,6 @@ parser.add_argument('--sgdadjust', default=1, type=int, help='sgd method adjust 
 parser.add_argument('--sgdstep', default=5, type=int, help='number of steps to adjust lr for sgd, default 5')
 parser.add_argument('--sgdgamma', default=0.1, type=float, help='gamma of steps to adjust lr for sgd, default 0.1')
 parser.add_argument('--LFB_l', default=30, type=int, help='long term feature bank length')
-
-parser.add_argument('--load_LFB', default=True, type=bool, help='whether load exist long term feature bank')
-parser.add_argument('--model_path', default='./LFB/FBmodel/x.pth', type=str, help='the path of the memory bank model')
 
 args = parser.parse_args()
 
@@ -105,105 +136,160 @@ def pil_loader(path):
         with Image.open(f) as img:
             return img.convert('RGB')
 
-class RandomCrop(object):
-
-    def __init__(self, size, padding=0):
-        if isinstance(size, numbers.Number):
-            self.size = (int(size), int(size))
-        else:
-            self.size = size
-        self.padding = padding
-        self.count = 0
-
-    def __call__(self, img):
-
-        if self.padding > 0:
-            img = ImageOps.expand(img, border=self.padding, fill=0)
-
-        w, h = img.size
-        th, tw = self.size
-        if w == tw and h == th:
-            return img
-
-        random.seed(self.count // SEQ_LENGTH)
-        x1 = random.randint(0, w - tw)
-        y1 = random.randint(0, h - th)
-        # print(self.count, x1, y1)
-        self.count += 1
-        return img.crop((x1, y1, x1 + tw, y1 + th))
-
-
-class RandomHorizontalFlip(object):
-    def __init__(self):
-        self.count = 0
-
-    def __call__(self, img):
-        seed = self.count // SEQ_LENGTH
-        random.seed(seed)
-        prob = random.random()
-        self.count += 1
-        # print(self.count, seed, prob)
-        if prob < 0.5:
-            return img.transpose(Image.FLIP_LEFT_RIGHT)
-        return img
-
-class RandomRotation(object):
-    def __init__(self,degrees):
-        self.degrees = degrees
-        self.count = 0
-
-    def __call__(self, img):
-        seed = self.count // SEQ_LENGTH
-        random.seed(seed)
-        self.count += 1
-        angle = random.randint(-self.degrees,self.degrees)
-        return TF.rotate(img, angle)
-
-class ColorJitter(object):
-    def __init__(self,brightness=0.1, contrast=0.1, saturation=0.1, hue=0.1):
-        self.brightness = brightness
-        self.contrast = contrast
-        self.saturation = saturation
-        self.hue = hue
-        self.count = 0
-
-    def __call__(self, img):
-        seed = self.count // SEQ_LENGTH
-        random.seed(seed)
-        self.count += 1
-        brightness_factor = random.uniform(1 - self.brightness, 1 + self.brightness)
-        contrast_factor = random.uniform(1 - self.contrast, 1 + self.contrast)
-        saturation_factor = random.uniform(1 - self.saturation, 1 + self.saturation)
-        hue_factor = random.uniform(- self.hue, self.hue)
-
-        img_ = TF.adjust_brightness(img,brightness_factor)
-        img_ = TF.adjust_contrast(img_,contrast_factor)
-        img_ = TF.adjust_saturation(img_,saturation_factor)
-        img_ = TF.adjust_hue(img_,hue_factor)
-        
-        return img_
-
-
-class CholecDataset(Dataset):
-    def __init__(self, file_paths, file_labels, transform=None,
-                 loader=pil_loader):
-        self.file_paths = file_paths
-        self.file_labels_phase = file_labels
+class HystDataset(Dataset):
+    def __init__(self, df, mount_point = "./", transform=None, img_column="vid_path", len_video = 'len_video',
+                 class_column='class'):
+        self.df = df
+        self.mount_point = mount_point
         self.transform = transform
-        self.loader = loader
+        self.img_column = img_column
+        self.class_column = class_column
+        self.len_video = len_video
 
-    def __getitem__(self, index):
-        img_names = self.file_paths[index]
-        labels_phase = self.file_labels_phase[index]
-        imgs = self.loader(img_names)
-        if self.transform is not None:
-            imgs = self.transform(imgs)
+        self.cumulative_frames = df[self.len_video].cumsum().to_list()
+        self.num_sequences = (self.cumulative_frames[-1] - 9*len(df[self.img_column]))
 
-        return imgs, labels_phase, index
+
+        # Keep a cache of samples already read
+        # self.cache = {}
+
+        # shared_array_base = mp.Array(ctypes.c_float, self.num_sequences*c*h*w)
+        # shared_array = np.ctypeslib.as_array(shared_array_base.get_obj())
+        # shared_array = shared_array.reshape(nb_samples, c, h, w)
+        # self.shared_array = torch.from_numpy(shared_array)
+        # self.use_cache = False
+
 
     def __len__(self):
-        return len(self.file_paths)
+        return self.num_sequences
 
+    def __getitem__(self, idx): ## idx should be the sequence index
+        video_idx, start_frame_idx = self.find_video_and_frame(idx)
+
+        vid_path = os.path.join(self.mount_point, self.df.iloc[video_idx][self.img_column])
+        try:
+            sequence = self.read_sequence(vid_path, start_frame_idx)
+        except Exception as e:
+            print("error reading sequence")
+            sequence = np.zeros((256, 256, 3), dtype=np.float32)
+
+        if self.transform:
+            sequence = self.transform(sequence)
+
+        if self.class_column != None:
+            class_label = torch.tensor(self.df.iloc[video_idx][self.class_column]).to(torch.long)
+
+        return sequence, class_label
+
+    def find_video_and_frame(self, idx):
+        # Find the video number from the global sequence idx
+        video_idx = 0
+        for i, total_frames in enumerate(self.cumulative_frames):
+            if total_frames > idx:
+                video_idx = i - 1
+                break
+
+        start_frame_idx = idx - self.cumulative_frames[video_idx] ## remove the previous videos length to get the indexing from 0 to len_video
+
+        return video_idx, start_frame_idx
+
+    def read_sequence(self, vid_path, start_frame_idx):
+
+        # if vid_path and start_frame_idx in cache
+        # return cache
+
+        # else
+        img = iio.imread(vid_path, plugin="pyav")
+        return img[start_frame_idx:start_frame_idx+SEQ_LENGTH,:,:,:]
+
+
+class TrainTransforms:
+    def __init__(self, height: int = 224, num_frames=10):
+        # image augmentation functions
+        self.train_transform = transforms.Compose(
+            [
+                # RandomChoice(num_frames=num_frames),
+                EnsureChannelFirst(channel_dim=-1),
+                PermuteTimeChannel(),
+                transforms.RandomResizedCrop(224, scale=(0.2, 1.0), antialias=True),                
+                ToTensor(dtype=torch.float32),                
+                ScaleIntensityRange(0, 255, 0, 1)
+            ]
+        )
+    def __call__(self, inp):
+        return self.train_transform(inp)
+
+class EvalTransforms:
+    def __init__(self, height: int = 224, num_frames=10):
+        self.test_transform = transforms.Compose(
+            [
+                # RandomChoice(num_frames=num_frames),
+                EnsureChannelFirst(channel_dim=-1),
+                PermuteTimeChannel(),
+                ResizeWithPadOrCrop((-1, 224, 224)),
+                ToTensor(dtype=torch.float32),                
+                ScaleIntensityRange(0, 255, 0, 1)                
+            ]
+        )
+    def __call__(self, inp):
+        return self.test_transform(inp)
+
+class TestTransforms:
+    def __init__(self, height: int = 224, num_frames=512):
+        self.test_transform = transforms.Compose(
+            [
+                # RandomChoice(num_frames=num_frames),
+                EnsureChannelFirst(channel_dim=-1),
+                PermuteTimeChannel(),
+                ResizeWithPadOrCrop((-1, 224, 224)),
+                ToTensor(dtype=torch.float32),                
+                ScaleIntensityRange(0, 255, 0, 1)                
+            ]
+        )
+    def __call__(self, inp):
+        return self.test_transform(inp)
+
+class PermuteTimeChannel:
+    def __init__(self, permute=(1,0,2,3)):
+        self.permute = permute        
+    def __call__(self, x):
+        return torch.permute(x, self.permute)
+
+class RandomChoice:
+    def __init__(self, num_frames=-1):
+        self.num_frames = num_frames
+    def __call__(self, x):
+        if self.num_frames > 0:
+            # idx = torch.randint(0, high=x.shape[0], size=(min(self.num_frames, len(x)),))
+            idx = torch.randint(0, high=x.shape[0], size=(self.num_frames,))
+            if self.num_frames == 1:
+                x = x[idx[0]]
+            else:
+                idx, _ = torch.sort(idx)
+                x = x[idx]
+        return x
+    
+def display_sequence(video):
+    batch_size =10
+    fig = plt.figure(figsize=(20,20))
+
+    ncols = int(np.sqrt(batch_size))
+    nrows = max(1, (batch_size-1) // ncols+1)
+
+    video = video.data.cpu()
+    for idx in range(batch_size):
+        ax = fig.add_subplot(nrows, ncols, idx+1)
+        img = video[idx,:,:,:]
+
+
+        # img = np.reshape(img, (224,224,3))
+        img = np.transpose(img,axes=(1,2,0))
+        
+        x_norm = (img-np.min(img))/(np.max(img)-np.min(img))        
+        plt.imshow(x_norm[:,:,1])
+    # plt.savefig(path)
+    plt.close()
+    return fig 
 
 class resnet_lstm(torch.nn.Module):
     def __init__(self):
@@ -222,8 +308,7 @@ class resnet_lstm(torch.nn.Module):
         self.share.add_module("layer4", resnet.layer4)
         self.share.add_module("avgpool", resnet.avgpool)
         self.lstm = nn.LSTM(2048, 512, batch_first=True)
-
-        self.fc_c = nn.Linear(512, 6)
+        self.fc_c = nn.Linear(512, 7)
         self.fc_h_c = nn.Linear(1024, 512)
         self.nl_block = NLBlock()
         self.dropout = nn.Dropout(p=0.5)
@@ -288,32 +373,24 @@ class resnet_lstm_LFB(torch.nn.Module):
 def get_useful_start_idx(SEQ_LENGTH, list_each_length):
     count = 0
     idx = []
-    for i in range(len(list_each_length)): #for each video
-        for j in range(count, count + (list_each_length[i] + 1 - SEQ_LENGTH)):# for second 0 to seconds N -10
-            idx.append(j)# add each second of videos 
+    for i in range(len(list_each_length)):
+        for j in range(count, count + (list_each_length[i] + 1 - SEQ_LENGTH)):
+            idx.append(j)
         count += list_each_length[i]
     return idx
 
 
 def get_long_feature(start_index_list, dict_start_idx_LFB, lfb):
     long_feature = []
-    """
-        start_index_list: list of start of sequence index per video, shape of BS
-        dic_start_index: dictionaries where 
-            - values are going from 0 to n_frames used (without jumping frames index)
-            - keys are the index of frames used as start index (with jumping the 10 last indexing)
-        lfb: numpy array of the output of the lstm network, of shape (frames, videos), i.e. frame feature
-
-    """
 
     ## lfb = the pickle we created
-    for start_index in start_index_list: ## for each starting index (video)
+    for j in range(len(start_index_list)): ## for each starting index (video)
         long_feature_each = []
         
-        last_LFB_index_no_empty = dict_start_idx_LFB[start_index]
+        last_LFB_index_no_empty = dict_start_idx_LFB[int(start_index_list[j])]
         
         for k in range(LFB_lENGTH): ## from 0 to 29
-            LFB_index = start_index - k - 1 #index -1 to index -30
+            LFB_index = int(start_index_list[j] - k - 1) # -1 to -30
             if LFB_index in dict_start_idx_LFB:   
                 LFB_index = dict_start_idx_LFB[LFB_index]
                 long_feature_each.append(lfb[LFB_index])
@@ -326,93 +403,6 @@ def get_long_feature(start_index_list, dict_start_idx_LFB, lfb):
     return long_feature
 
 
-def get_csv_data(data_path, split='train'):
-    df = pd.read_csv(data_path)
-
-    paths = df['frame'].to_numpy()
-    labels = df['class'].to_numpy()
-    n_classes = np.unique(labels)
-    num_each = []
-
-    for class_name in n_classes:
-        df_tmp = df.loc[df['class']==class_name]
-        len_vids = df_tmp['id'].value_counts().to_list()
-        for elt in len_vids:
-           num_each.append(elt)
-
-    print((num_each))
-    print('{}_paths  : {:6d}'.format(split, len(paths)))
-
-    train_transforms = None
-    test_transforms = None
-    if use_flip == 0:
-        train_transforms = transforms.Compose([
-            transforms.Resize((250, 250)),
-            RandomCrop(224),
-            RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize([0.41757566,0.26098573,0.25888634],[0.21938758,0.1983,0.19342837])
-        ])
-    elif use_flip == 1:
-        train_transforms = transforms.Compose([
-            transforms.Resize((250, 250)),
-            RandomCrop(224),
-            ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.05),
-            RandomHorizontalFlip(),
-            RandomRotation(5),
-            transforms.ToTensor(),
-            transforms.Normalize([0.41757566,0.26098573,0.25888634],[0.21938758,0.1983,0.19342837])
-        ])
-
-    if crop_type == 0:
-        test_transforms = transforms.Compose([
-            transforms.Resize((250, 250)),
-            transforms.RandomCrop(224),
-            transforms.ToTensor(),
-            transforms.Normalize([0.41757566,0.26098573,0.25888634],[0.21938758,0.1983,0.19342837])
-        ])
-    elif crop_type == 1:
-        test_transforms = transforms.Compose([
-            transforms.Resize((250, 250)),
-            transforms.CenterCrop(224),
-            transforms.ToTensor(),
-            transforms.Normalize([0.41757566,0.26098573,0.25888634],[0.21938758,0.1983,0.19342837])
-        ])
-    elif crop_type == 2:
-        test_transforms = transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize([0.41757566,0.26098573,0.25888634],[0.21938758,0.1983,0.19342837])
-        ])
-    elif crop_type == 5:
-        test_transforms = transforms.Compose([
-            transforms.Resize((250, 250)),
-            transforms.FiveCrop(224),
-            Lambda(lambda crops: torch.stack([transforms.ToTensor()(crop) for crop in crops])),
-            Lambda(
-                lambda crops: torch.stack(
-                    [transforms.Normalize([0.41757566,0.26098573,0.25888634],[0.21938758,0.1983,0.19342837])(crop) for crop in crops]))
-        ])
-    elif crop_type == 10:
-        test_transforms = transforms.Compose([
-            transforms.Resize((250, 250)),
-            transforms.TenCrop(224),
-            Lambda(lambda crops: torch.stack([transforms.ToTensor()(crop) for crop in crops])),
-            Lambda(
-                lambda crops: torch.stack(
-                    [transforms.Normalize([0.41757566,0.26098573,0.25888634],[0.21938758,0.1983,0.19342837])(crop) for crop in crops]))
-        ])
-
-    if split == 'train':
-        dataset = CholecDataset(paths, labels, train_transforms)
-    elif split=='val':
-        dataset = CholecDataset(paths, labels, test_transforms)
-    elif split=='LFB':
-        dataset = CholecDataset(paths, labels, test_transforms)
-
-    return dataset, num_each
-
-
 
 def get_long_feature_v2(start_index_list, dict_start_idx_LFB, lfb):
     long_feature = []
@@ -422,160 +412,39 @@ def get_long_feature_v2(start_index_list, dict_start_idx_LFB, lfb):
         last_LFB_index_no_empty = dict_start_idx_LFB[start_index]
         
         for k in range(LFB_lENGTH):
-            LFB_key = (start_index - k - 1) ## going backward, the previous 30 frames
-            if int(LFB_key) in dict_start_idx_LFB: 
-                LFB_value = dict_start_idx_LFB[int(LFB_key)]
-                long_feature_each.append(lfb[LFB_value])
-                last_LFB_index_no_empty = LFB_value
+            LFB_index = (start_index - k - 1)
+            if int(LFB_index) in dict_start_idx_LFB:                
+                LFB_index = dict_start_idx_LFB[int(LFB_index)]
+                long_feature_each.append(lfb[LFB_index])
+                last_LFB_index_no_empty = LFB_index
             else:
                 long_feature_each.append(lfb[last_LFB_index_no_empty])
             
         long_feature.append(long_feature_each)
     return long_feature
 
+def get_csv_data(data_path, mount_point, split='train'):
+    df = pd.read_csv(data_path)
 
+    df['vid_path'] = mount_point + df['vid_path'].astype(str)
 
-def get_data(data_path):
-    with open(data_path, 'rb') as f:
-        train_test_paths_labels = pickle.load(f)
+    train_transforms = TrainTransforms()
+    test_transforms = TestTransforms()
 
-    train_paths_80 = train_test_paths_labels[0]
-    val_paths_80 = train_test_paths_labels[1]
-    train_labels_80 = train_test_paths_labels[2]
-    val_labels_80 = train_test_paths_labels[3]
-    train_num_each = train_test_paths_labels[4]
-    val_num_each_80 = train_test_paths_labels[5]
+    if split=='train':
+        dataset = HystDataset(df, mount_point, train_transforms)
+    elif split=='val':
+        dataset = HystDataset(df, mount_point, test_transforms)
+    elif split=='LFB':
+        dataset = HystDataset(df, mount_point, test_transforms)
 
-    print('train_paths_80  : {:6d}'.format(len(train_paths_80)))
-    print('train_labels_80 : {:6d}'.format(len(train_labels_80)))
-    print(train_num_each)
+    return dataset, df['len_video']
 
-    train_labels_80 = np.asarray(train_labels_80, dtype=np.int64)
-    val_labels_80 = np.asarray(val_labels_80, dtype=np.int64)
-
-    train_transforms = None
-    test_transforms = None
-
-    if use_flip == 0:
-        train_transforms = transforms.Compose([
-            transforms.Resize((250, 250)),
-            RandomCrop(224),
-            RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize([0.41757566,0.26098573,0.25888634],[0.21938758,0.1983,0.19342837])
-        ])
-    elif use_flip == 1:
-        train_transforms = transforms.Compose([
-            transforms.Resize((250, 250)),
-            RandomCrop(224),
-            ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, hue=0.05),
-            RandomHorizontalFlip(),
-            RandomRotation(5),
-            transforms.ToTensor(),
-            transforms.Normalize([0.41757566,0.26098573,0.25888634], [0.21938758,0.1983,0.19342837])
-        ])
-    if crop_type == 0:
-        test_transforms = transforms.Compose([
-            transforms.Resize((250, 250)),
-            transforms.RandomCrop(224),
-            transforms.ToTensor(),
-            transforms.Normalize([0.41757566,0.26098573,0.25888634],[0.21938758,0.1983,0.19342837])
-        ])
-    elif crop_type == 1:
-        test_transforms = transforms.Compose([
-            transforms.Resize((250, 250)),
-            transforms.CenterCrop(224),
-            transforms.ToTensor(),
-            transforms.Normalize([0.41757566,0.26098573,0.25888634],[0.21938758,0.1983,0.19342837])
-        ])
-    elif crop_type == 2:
-        test_transforms = transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize([0.41757566,0.26098573,0.25888634],[0.21938758,0.1983,0.19342837])
-        ])
-    elif crop_type == 5:
-        test_transforms = transforms.Compose([
-            transforms.Resize((250, 250)),
-            transforms.FiveCrop(224),
-            Lambda(lambda crops: torch.stack([transforms.ToTensor()(crop) for crop in crops])),
-            Lambda(
-                lambda crops: torch.stack(
-                    [transforms.Normalize([0.41757566,0.26098573,0.25888634],[0.21938758,0.1983,0.19342837])(crop) for crop in crops]))
-        ])
-    elif crop_type == 10:
-        test_transforms = transforms.Compose([
-            transforms.Resize((250, 250)),
-            transforms.TenCrop(224),
-            Lambda(lambda crops: torch.stack([transforms.ToTensor()(crop) for crop in crops])),
-            Lambda(
-                lambda crops: torch.stack(
-                    [transforms.Normalize([0.41757566,0.26098573,0.25888634],[0.21938758,0.1983,0.19342837])(crop) for crop in crops]))
-        ])
-
-    ## train is flip - test is cropped
-    train_dataset_80 = CholecDataset(train_paths_80, train_labels_80, train_transforms)
-    val_dataset_80 = CholecDataset(val_paths_80, val_labels_80, test_transforms)
-    
-    # same train dataset for LFB but cropped instead of flip
-    train_dataset_80_LFB = CholecDataset(train_paths_80, train_labels_80, test_transforms)
-
-    return (train_dataset_80,train_dataset_80_LFB), train_num_each, \
-           val_dataset_80, val_num_each_80
-
-
-# 序列采样sampler
-class SeqSampler(Sampler):
-    def __init__(self, data_source, idx):
-        super().__init__(data_source)
-        self.data_source = data_source
-        self.idx = idx
-
-    def __iter__(self):
-        return iter(self.idx)
-
-    def __len__(self):
-        return len(self.idx)
+sig_f = nn.Sigmoid()
 
 # Long Term Feature bank
 g_LFB_train = np.zeros(shape=(0, 512))
 g_LFB_val = np.zeros(shape=(0, 512))
-
-def valMinibatch(testloader, model, dict_start_idx_LFB):
-    model.eval()
-    criterion_phase = nn.CrossEntropyLoss(reduction='sum')
-    with torch.no_grad():
-        val_loss_phase = 0.0
-        val_corrects_phase = 0.0
-        for data in testloader:
-            if use_gpu:
-                inputs, labels_phase = data[0].to(device), data[1].to(device)
-            else:
-                inputs, labels_phase = data[0], data[1]
-
-            labels_phase = labels_phase[(SEQ_LENGTH - 1)::SEQ_LENGTH]
-
-            start_index_list = data[2]
-            start_index_list = start_index_list[0::SEQ_LENGTH]
-            long_feature = get_long_feature(
-                start_index_list=start_index_list,
-                dict_start_idx_LFB=dict_start_idx_LFB,
-                lfb=g_LFB_val)
-
-            long_feature = torch.Tensor(long_feature).to(device)
-
-            inputs = inputs.view(-1, SEQ_LENGTH, 3, 224, 224)
-            outputs_phase = model.forward(inputs, long_feature=long_feature)
-            # outputs_phase = outputs_phase[SEQ_LENGTH - 1::SEQ_LENGTH]
-
-            _, preds_phase = torch.max(outputs_phase.data, 1)
-            loss_phase = criterion_phase(outputs_phase, labels_phase)
-
-            val_loss_phase += loss_phase.data.item()
-            val_corrects_phase += torch.sum(preds_phase == labels_phase.data)
-
-    model.train()
-    return val_loss_phase, val_corrects_phase
 
 
 def create_frames_index(sequence_length, list_start_idx):
@@ -585,26 +454,22 @@ def create_frames_index(sequence_length, list_start_idx):
             list_idx.append(idx_frame + j)
     return list_idx
 
+def create_mapping_feature_frames(n_frames, len_videos):
 
-import matplotlib.pyplot as plt
+    prev_video_len = 0
+    dic_values = []
+    for vid_len in len_videos :
+        # print(prev_video_len, prev_video_len+vid_len-10)
+        for j in range(prev_video_len, prev_video_len + vid_len -9):
+            dic_values.append(j)
+        prev_video_len += vid_len
+        
+    idx, val = zip(*list(enumerate(dic_values)))
+    mapping_features = dict(zip(idx, val))
 
-def display_sequence(video):
-    batch_size =10
-    fig = plt.figure(figsize=(20,20))
+    return mapping_features
 
-    ncols = int(np.sqrt(batch_size))
-    nrows = max(1, (batch_size-1) // ncols+1)
 
-    video = video.data.cpu()
-    print(video.shape)
-    for idx in range(batch_size):
-        ax = fig.add_subplot(nrows, ncols, idx+1)
-        img = video[idx,...]
-        img = np.reshape(img, (224,224,3))
-        plt.imshow(img)
-    # plt.savefig(path)
-    plt.close()
-    return fig 
 
 
 def train_model():
@@ -614,64 +479,47 @@ def train_model():
                         workspace='luciedle')
     
 
-    train_dataset, train_num_each= get_csv_data('/home/lumargot/scripts/train_frames.csv')
-    train_dataset_80_LFB, train_num_each_LFB= get_csv_data('/home/lumargot/scripts/train_frames.csv','LFB')
-    val_dataset, val_num_each = get_csv_data('/home/lumargot/scripts/val_frames.csv', 'val')
-
-    print(train_num_each, val_num_each)
-
-    df_train = pd.read_csv('/home/lumargot/scripts/train_frames.csv')    
+    df_train = pd.read_csv(args.train_csv)    
 
     unique_classes = np.sort(np.unique(df_train['class']))
     unique_class_weights = np.array(class_weight.compute_class_weight(class_weight='balanced', classes=unique_classes, y=df_train['class']))    
     unique_class_weights = torch.tensor(unique_class_weights).to(torch.float32)
 
-    ## val_num_each/train_num_each == list of the length of the videos
+    train_dataset, train_list_len_vids = get_csv_data(args.train_csv, args.mount_point)
+    val_dataset, val_list_len_vids = get_csv_data(args.val_csv, args.mount_point, 'val')
+    lfb_dataset, _ = get_csv_data(args.val_csv, args.mount_point, 'LFB')
 
-    train_we_use_start_idx = get_useful_start_idx(SEQ_LENGTH, train_num_each) ## list of global indexing 
-    val_we_use_start_idx = get_useful_start_idx(SEQ_LENGTH, val_num_each)
+    map_features_frames = create_mapping_feature_frames(train_dataset.cumulative_frames[-1], train_list_len_vids.to_list())
 
-    ## train and val start idx are the samr for the LFB and the notmal network
-    num_train_we_use = len(train_we_use_start_idx)
-    num_val_we_use = len(val_we_use_start_idx)
-
-    ## train_idx is the sequence of 10 frames to look at while training
     ## both are tghe same as above
-    train_idx = create_frames_index(SEQ_LENGTH,train_we_use_start_idx)
-    val_idx = create_frames_index(SEQ_LENGTH,val_we_use_start_idx)
-
-    dict_index, dict_value = zip(*list(enumerate(train_we_use_start_idx)))
-    dict_train_start_idx_LFB = dict(zip(dict_value, dict_index))
+    # train_idx_LFB = create_frames_index(SEQ_LENGTH,train_we_use_start_idx_80_LFB)
+    # val_idx_LFB = create_frames_index(SEQ_LENGTH,val_we_use_start_idx_LFB)
 
 
     """
-        dictionnary :
+        dictionnary insight :
         {1:1, ... 1298:1298, 1308:1299}
 
         index = index
         value = index of frames
 
         when we reach the end of the first video at the frame 1298 (1298:1298). 
-        we add +10 to start a new video to avoid taking the previous frame index 
+        we add +9 to start a new video to avoid taking the previous frame index 
     
     """
+    num_train_all = train_dataset.num_sequences
+    num_val_all = val_dataset.num_sequences
 
-    dict_index, dict_value = zip(*list(enumerate(val_we_use_start_idx)))
-    dict_val_start_idx_LFB = dict(zip(dict_value, dict_index))
-
-    num_train_all = len(train_idx)
-    num_val_all = len(val_idx)
-
-    print('num train start idx 80: {:6d}'.format(len(train_we_use_start_idx)))
+    # print('num train start idx 80: {:6d}'.format(len(train_we_use_start_idx_80_LFB)))
     print('num of all train use: {:6d}'.format(num_train_all))
     print('num of all valid use: {:6d}'.format(num_val_all))
-    print('num of all train LFB use: {:6d}'.format(len(train_idx)))
-    print('num of all valid LFB use: {:6d}'.format(len(val_idx)))
+    # print('num of all train LFB use: {:6d}'.format(len(train_idx_LFB)))
+    # print('num of all valid LFB use: {:6d}'.format(len(val_idx_LFB)))
 
     val_loader = DataLoader(
         val_dataset,
         batch_size=VAL_BS,
-        sampler=SeqSampler(val_dataset, val_idx),
+        # sampler=SeqSampler(val_dataset, val_idx_LFB),
         num_workers=WORKERS,
         pin_memory=False
     )
@@ -680,21 +528,21 @@ def train_model():
     global g_LFB_val
     print("loading features!>.........")
 
-    # LOAD_EXIST_LFB = False
+    #LOAD_EXIST_LFB = False
     if not LOAD_EXIST_LFB:
 
         print("no LFB pickle ! Generating...")        
         train_feature_loader = DataLoader(
             train_dataset_80_LFB,
             batch_size=VAL_BS,
-            sampler=SeqSampler(train_dataset_80_LFB, train_idx),
+            # sampler=SeqSampler(train_dataset_80_LFB, train_idx_LFB),
             num_workers=WORKERS,
             pin_memory=False
         )
         val_feature_loader = DataLoader(
             val_dataset,
             batch_size=VAL_BS,
-            sampler=SeqSampler(val_dataset, val_idx),
+            sampler=SeqSampler(val_dataset, val_idx_LFB),
             num_workers=WORKERS,
             pin_memory=False
         )
@@ -722,16 +570,20 @@ def train_model():
                     inputs, labels_phase = data[0].to(device), data[1].to(device)
                 else:
                     inputs, labels_phase = data[0], data[1]
+                print(inputs.shape)
 
                 inputs = inputs.view(-1, SEQ_LENGTH, 3, 224, 224)
+                print(inputs.shape) ## same outputs [ n_vid, 10, 3, 224, 224]
                 outputs_feature = model_LFB.forward(inputs)
+                print(outputs_feature.shape)
 
-                for feature in outputs_feature: ## for each video 
-                    save_feature = feature.cpu().numpy()
+                for j in range(len(outputs_feature)):
+                    save_feature = outputs_feature.data.cpu()[j].numpy()
                     save_feature = save_feature.reshape(1, 512)
                     g_LFB_train = np.concatenate((g_LFB_train, save_feature),axis=0)
 
-            print("val feature length:", g_LFB_train.shape)
+                print("train feature length:",len(g_LFB_train))
+
             for data in val_feature_loader:
                 if use_gpu:
                     inputs, labels_phase = data[0].to(device), data[1].to(device)
@@ -741,25 +593,28 @@ def train_model():
                 inputs = inputs.view(-1, SEQ_LENGTH, 3, 224, 224)
                 outputs_feature = model_LFB.forward(inputs)
 
-                for feature in outputs_feature:
-                    save_feature = feature.data.cpu().numpy()
+                for j in range(len(outputs_feature)):
+                    save_feature = outputs_feature.data.cpu()[j].numpy()
                     save_feature = save_feature.reshape(1, 512)
                     g_LFB_val = np.concatenate((g_LFB_val, save_feature), axis=0)
 
+                print("val feature length:",len(g_LFB_val))
 
         print("finish!")
+        g_LFB_train = np.array(g_LFB_train)
+        g_LFB_val = np.array(g_LFB_val)
 
-        with open("./LFB/g_LFB_hyst_train.pkl", 'wb') as f:
-            pickle.dump(g_LFB_train, f)
+        # with open("./LFB/g_LFB_train.pkl", 'wb') as f:
+        #     pickle.dump(g_LFB_train, f)
 
-        with open("./LFB/g_LFB_hyst_val.pkl", 'wb') as f:
-            pickle.dump(g_LFB_val, f)
+        # with open("./LFB/g_LFB_val.pkl", 'wb') as f:
+        #     pickle.dump(g_LFB_val, f)
     
     else:
-        with open("./LFB/g_LFB_hyst_train.pkl", 'rb') as f:
+        with open("./LFB/g_LFB_train.pkl", 'rb') as f:
             g_LFB_train = pickle.load(f)
 
-        with open("./LFB/g_LFB_hyst_val.pkl", 'rb') as f:
+        with open("./LFB/g_LFB_val.pkl", 'rb') as f:
             g_LFB_val = pickle.load(f)
 
         print("load completed")
@@ -777,7 +632,7 @@ def train_model():
         model = DataParallel(model)
         model.to(device)
 
-    criterion_phase = nn.CrossEntropyLoss(reduction='sum', weight=unique_class_weights.to(device))
+    criterion_phase = nn.CrossEntropyLoss(reduction='sum')
 
     optimizer = None
     exp_lr_scheduler = None
@@ -824,13 +679,13 @@ def train_model():
 
     for epoch in range(EPOCHS):
         torch.cuda.empty_cache()
-        np.random.shuffle(train_we_use_start_idx)
-        train_idx_80 = create_frames_index(SEQ_LENGTH, train_we_use_start_idx)
+        # np.random.shuffle(train_we_use_start_idx_80_LFB)
+        # train_idx_80 = create_frames_index(SEQ_LENGTH, train_we_use_start_idx_80_LFB)
 
         train_loader_80 = DataLoader(
             train_dataset,
             batch_size=TRAIN_BS,
-            sampler=SeqSampler(train_dataset, train_idx_80),
+            # sampler=SeqSampler(train_dataset_80, train_idx_80),
             num_workers=WORKERS,
             pin_memory=False
         )
@@ -859,27 +714,43 @@ def train_model():
             else:
                 inputs, labels_phase = data[0], data[1]
 
+
             labels_phase = labels_phase[(SEQ_LENGTH - 1)::SEQ_LENGTH]
 
             start_index_list = data[2]
 
-            start_index_seq_video = start_index_list[0::SEQ_LENGTH].numpy() ## take index of each video
-
-            long_feature = get_long_feature(start_index_list=start_index_seq_video,
-                                            dict_start_idx_LFB=dict_train_start_idx_LFB,
+            start_index_list = start_index_list[0::SEQ_LENGTH] ## take index of each video
+            long_feature = get_long_feature(start_index_list=start_index_list,
+                                            dict_start_idx_LFB=map_features_frames,
                                             lfb=g_LFB_train) #g_LFB_train of shape 70,744 - 512
             
-            
             long_feature = np.array(long_feature)
-            print(long_feature.shape) # (10, 30, 512)
+            # print(long_feature.shape) # (10, 30, 512)
 
             long_feature = (torch.Tensor(long_feature)).to(device)
 
+            print(inputs.shape)
             inputs = inputs.view(-1, SEQ_LENGTH, 3, 224, 224)
+            # TODO
+
+
+            for vid in range(inputs.shape[0]):
+                img = display_sequence(inputs[vid,...])
+
+                buf = io.BytesIO()
+                img.savefig(buf, format='png')
+                buf.seek(0)
+                vid_name = "video number: " + str(vid)
+                exp.log_image(buf, vid_name,step=epoch)
+
+            buf.close()
+
 
             outputs_phase = model.forward(inputs, long_feature=long_feature)
+            print(outputs_phase.shape)
 
             _, preds_phase = torch.max(outputs_phase.data, 1)
+            print(preds_phase.shape)
             loss_phase = criterion_phase(outputs_phase, labels_phase)
 
             loss = loss_phase
@@ -897,10 +768,26 @@ def train_model():
             if i % 500 == 499:
                 # ...log the running loss
                 batch_iters = epoch * num_train_all/SEQ_LENGTH + i*TRAIN_BS/SEQ_LENGTH
-                running_loss = running_loss_phase / (TRAIN_BS*500/SEQ_LENGTH) 
+                writer.add_scalar('training loss phase',
+                                  running_loss_phase / (TRAIN_BS*500/SEQ_LENGTH) , batch_iters)
                 # ...log the training acc
-                running_acc = float(minibatch_correct_phase) / (float(TRAIN_BS)*500/SEQ_LENGTH)
+                writer.add_scalar('training acc phase',
+                                  float(minibatch_correct_phase) / (float(TRAIN_BS)*500/SEQ_LENGTH), batch_iters)
                 # ...log the val acc loss
+
+                # val_loss_phase, val_corrects_phase = valMinibatch(val_loader, model, dict_start_idx_LFB=dict_val_start_idx_LFB)
+                # writer.add_scalar('validation acc miniBatch phase',
+                #                   float(val_corrects_phase) / float(num_val_we_use), batch_iters)
+                # writer.add_scalar('validation loss miniBatch phase',
+                #                   float(val_loss_phase) / float(num_val_we_use), batch_iters)
+
+                # val_accuracy_phase = float(val_corrects_phase) / float(num_val_we_use)
+
+                # if val_accuracy_phase > best_val_accuracy_phase:
+                #     save_val_phase = int("{:4.0f}".format(val_accuracy_phase * 10000))
+                #     public_name = "minibatch_cnn_lstm_phase_valPhase_" + str(save_val_phase)
+
+                #     torch.save(model.module.state_dict(),"./best_model/non-local/pretrained_lr5e-7_L30_2fc_copy_mutiConv6_3_v2/" + public_name + ".pth")
 
                 running_loss_phase = 0.0
                 minibatch_correct_phase = 0.0
@@ -940,7 +827,7 @@ def train_model():
                 labels_phase = labels_phase[(SEQ_LENGTH - 1)::SEQ_LENGTH]
 
                 start_index_list = data[2]
-                start_index_list = start_index_list[0::SEQ_LENGTH].numpy()
+                start_index_list = start_index_list[0::SEQ_LENGTH]
                 long_feature = get_long_feature(start_index_list=start_index_list,
                                                 dict_start_idx_LFB=dict_val_start_idx_LFB,
                                                 lfb=g_LFB_val)
@@ -953,7 +840,9 @@ def train_model():
                 outputs_phase = model.forward(inputs, long_feature=long_feature)
                 # outputs_phase = outputs_phase[SEQ_LENGTH - 1::SEQ_LENGTH]
 
+                print(outputs_phase.shape)
                 _, preds_phase = torch.max(outputs_phase.data, 1)
+                print(preds_phase.shape)
                 loss_phase = criterion_phase(outputs_phase, labels_phase)
 
                 val_loss_phase += loss_phase.data.item()
@@ -982,10 +871,10 @@ def train_model():
         val_precision_each_phase = metrics.precision_score(val_all_labels_phase,val_all_preds_phase, average=None)
         val_recall_each_phase = metrics.recall_score(val_all_labels_phase,val_all_preds_phase, average=None)
 
-        # writer.add_scalar('validation acc epoch phase',
-        #                   float(val_accuracy_phase),epoch)
-        # writer.add_scalar('validation loss epoch phase',
-        #                   float(val_average_loss_phase),epoch)
+        writer.add_scalar('validation acc epoch phase',
+                          float(val_accuracy_phase),epoch)
+        writer.add_scalar('validation loss epoch phase',
+                          float(val_average_loss_phase),epoch)
 
         print('epoch: {:4d}'
               ' train in: {:2.0f}m{:2.0f}s'
@@ -1007,18 +896,6 @@ def train_model():
 
         print("val_precision_each_phase:", val_precision_each_phase)
         print("val_recall_each_phase:", val_recall_each_phase)
-
-
-        train_metrics = {"training loss": running_loss, 
-                         "traininc acc": running_acc,
-                         
-                         "valid loss(phase)":val_average_loss_phase,
-                         "valid accu(phase)":val_accuracy_phase,
-
-                         "val_precision_each_phase": np.mean(val_precision_each_phase),
-                         "val_recall_each_phase": np.mean(val_recall_each_phase),
-        }
-        exp.log_metrics(train_metrics, epoch=epoch)
 
         if optimizer_choice == 0:
             if sgd_adjust_lr == 0:
@@ -1057,9 +934,7 @@ def train_model():
 
 
 def main():
-
     train_model()
-
 
 if __name__ == "__main__":
     main()

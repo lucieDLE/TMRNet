@@ -1,0 +1,8 @@
+*.vscode
+*.__pycache__
+*.log
+*.pkl
+*.run_docker.sh
+*.api
+pretrained_model
+output
